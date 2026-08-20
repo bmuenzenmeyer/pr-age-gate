@@ -8,16 +8,23 @@
 // forcing its shape onto the other.
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { getInput, info, setFailed } from "./actions-io.ts";
+import { getInput, info, notice, setFailed } from "./actions-io.ts";
 import { evaluateAgeGate, summaryFor } from "./age-gate.ts";
-import { listOpenPullRequests, fetchChangedFiles, type PullRequestTarget } from "./github-fetch.ts";
+import {
+  listOpenPullRequests,
+  fetchChangedFiles,
+  GitHubApiError,
+  type PullRequestTarget,
+} from "./github-fetch.ts";
 import { upsertCheckRun } from "./github-checks.ts";
 import { isBypassedByLabel, isBypassedByPath, parseCommaSeparated } from "./bypass.ts";
 
 interface PullRequestEventPayload {
   pull_request?: {
     number: number;
-    head: { sha: string };
+    // `head.repo` is null once the fork it lived in has been deleted, so
+    // this is the one field here that genuinely can go missing.
+    head: { sha: string; repo?: { full_name: string } | null };
     created_at: string;
     labels?: { name: string }[];
   };
@@ -31,6 +38,32 @@ function readEventPayload(): PullRequestEventPayload {
   } catch {
     return {};
   }
+}
+
+/**
+ * A fork PR's GITHUB_TOKEN is downgraded to read-only regardless of what
+ * the workflow's `permissions:` block asks for, so the check-run write is
+ * expected to 403 on this event. Reads all still succeed — it is only the
+ * POST that is refused. The scheduled trigger runs in the base
+ * repository's context with full permissions and re-evaluates every open
+ * PR, so the gate still lands on fork PRs; failing the job here would
+ * only put a red X on external contributions for something neither the
+ * contributor nor the maintainer can act on.
+ *
+ * Scoped to `pull_request` on purpose: `pull_request_target` and
+ * `schedule` both get a write-capable token, so a 403 on those is a real
+ * misconfiguration — a missing `checks: write` — and has to stay loud.
+ */
+function isForkPullRequestEvent(
+  eventName: string | undefined,
+  payload: PullRequestEventPayload,
+  repoSlug: string
+): boolean {
+  if (eventName !== "pull_request") return false;
+  const headRepo = payload.pull_request?.head.repo?.full_name;
+  // Unknown head repo counts as not-a-fork, so a genuine permissions
+  // problem still surfaces rather than being quietly swallowed.
+  return headRepo !== undefined && headRepo !== repoSlug;
 }
 
 export async function run(): Promise<void> {
@@ -60,6 +93,8 @@ export async function run(): Promise<void> {
 
   const eventName = process.env.GITHUB_EVENT_NAME;
   const payload = readEventPayload();
+
+  const forkPullRequest = isForkPullRequestEvent(eventName, payload, repoSlug);
 
   // On a pull_request trigger, only that one PR needs evaluating (its
   // data, including labels, is already in the webhook payload, no fetch
@@ -97,7 +132,18 @@ export async function run(): Promise<void> {
     }
 
     const output = summaryFor({ ...ageResult, bypassed, bypassReason });
-    await upsertCheckRun({ token, owner, repo, sha: target.headSha, name: checkName, ...output });
+    try {
+      await upsertCheckRun({ token, owner, repo, sha: target.headSha, name: checkName, ...output });
+    } catch (err) {
+      if (forkPullRequest && err instanceof GitHubApiError && err.status === 403) {
+        notice(
+          `PR #${target.number} comes from a fork, so this event's token is read-only and the ` +
+            `"${checkName}" check run can't be written here. The scheduled run will create it.`
+        );
+        continue;
+      }
+      throw err;
+    }
     info(
       `PR #${target.number}: ${output.conclusion} (open ${ageResult.ageHours.toFixed(1)}h)` +
         (bypassed ? ` [bypassed via ${bypassReason}]` : "")

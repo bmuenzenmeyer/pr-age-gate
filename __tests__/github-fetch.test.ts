@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { githubRequest, fetchPullRequest, listOpenPullRequests, fetchChangedFiles } from "../src/github-fetch.ts";
+import {
+  githubRequest,
+  fetchPullRequest,
+  listOpenPullRequests,
+  fetchChangedFiles,
+  GitHubApiError,
+} from "../src/github-fetch.ts";
 import { withMockServer } from "./test-helpers.ts";
 
 test("retries a transient 503 and succeeds once the server recovers", async () => {
@@ -152,5 +158,23 @@ test("fetchChangedFiles returns filenames from the PR files endpoint", async () 
 
   const files = await fetchChangedFiles("acme", "widgets", 9, { apiBaseUrl: mock.url });
   assert.deepEqual(files, ["docs/a.md", "src/index.ts"]);
+  await mock.close();
+});
+
+test("githubRequest throws a GitHubApiError carrying the status, so callers can branch without regexing the message", async () => {
+  const mock = await withMockServer((_req, res) => {
+    res.writeHead(403, { "content-type": "application/json" });
+    res.end(JSON.stringify({ message: "Resource not accessible by integration" }));
+  });
+
+  await assert.rejects(
+    () => githubRequest("/repos/acme/widgets/check-runs", { method: "POST", apiBaseUrl: mock.url }),
+    (err: unknown) => {
+      assert.ok(err instanceof GitHubApiError);
+      assert.equal(err.status, 403);
+      assert.match(err.message, /403 Forbidden/);
+      return true;
+    }
+  );
   await mock.close();
 });

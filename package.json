@@ -1,6 +1,6 @@
 {
   "name": "pr-age-gate",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "type": "module",
   "description": "Verify (and, as a GitHub Action, enforce) that a pull request has been open for a configurable minimum number of hours before it's considered mergeable. Public-repo checks work with no token at all. Plain TypeScript, no runtime dependencies: the Action runs the source directly via Node's type stripping, the npm package ships compiled JS.",
   "keywords": [

@@ -332,3 +332,145 @@ test("run() bypasses via bypass-labels input, parsed from a comma-separated stri
   await mock.close();
   rmSync(path.dirname(eventFile), { recursive: true, force: true });
 });
+
+// A fork PR's token is downgraded to read-only whatever `permissions:`
+// asks for, so the check-run POST 403s while every read still succeeds —
+// this mock reproduces exactly that split, as observed on a real fork PR.
+function forkPermissionsMock(openPullRequests: unknown[] = []) {
+  return withMockServer((req, res) => {
+    // Only reached on triggers that sweep every open PR rather than
+    // reading the one in the webhook payload.
+    if (req.method === "GET" && req.url?.startsWith("/repos/acme/widgets/pulls?")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(openPullRequests));
+      return;
+    }
+    if (req.method === "GET" && req.url?.includes("/check-runs")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ check_runs: [] }));
+      return;
+    }
+    if (req.method === "POST" && req.url?.endsWith("/check-runs")) {
+      res.writeHead(403, { "content-type": "application/json" });
+      res.end(JSON.stringify({ message: "Resource not accessible by integration" }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+}
+
+test("run() tolerates the check-run 403 on a fork pull_request instead of failing the job", async () => {
+  const mock = await forkPermissionsMock();
+  const eventFile = writeEventFile({
+    pull_request: {
+      number: 14,
+      head: { sha: "sha14", repo: { full_name: "contributor/widgets" } },
+      created_at: new Date(Date.now() - 100 * 3600_000).toISOString(),
+      labels: [],
+    },
+  });
+
+  const messages: string[] = [];
+  const originalLog = console.log;
+  console.log = (msg?: unknown) => void messages.push(String(msg));
+  try {
+    // Resolving at all is the assertion: before this, the 403 propagated
+    // out of run() and setFailed put a red X on every external PR.
+    await withEnv(
+      {
+        GITHUB_API_URL: mock.url,
+        GITHUB_REPOSITORY: "acme/widgets",
+        GITHUB_EVENT_NAME: "pull_request",
+        GITHUB_EVENT_PATH: eventFile,
+        "INPUT_MIN-HOURS": "48",
+        "INPUT_GITHUB-TOKEN": "t",
+      },
+      run
+    );
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.ok(
+    messages.some((m) => m.startsWith("::notice::") && m.includes("comes from a fork")),
+    `expected a ::notice:: explaining the skip, got: ${messages.join(" | ")}`
+  );
+  await mock.close();
+  rmSync(path.dirname(eventFile), { recursive: true, force: true });
+});
+
+test("run() still fails on a 403 for a same-repo pull_request, where it means a missing checks:write", async () => {
+  const mock = await forkPermissionsMock();
+  const eventFile = writeEventFile({
+    pull_request: {
+      number: 15,
+      head: { sha: "sha15", repo: { full_name: "acme/widgets" } },
+      created_at: new Date(Date.now() - 100 * 3600_000).toISOString(),
+      labels: [],
+    },
+  });
+
+  try {
+    await assert.rejects(
+      () =>
+        withEnv(
+          {
+            GITHUB_API_URL: mock.url,
+            GITHUB_REPOSITORY: "acme/widgets",
+            GITHUB_EVENT_NAME: "pull_request",
+            GITHUB_EVENT_PATH: eventFile,
+            "INPUT_MIN-HOURS": "48",
+            "INPUT_GITHUB-TOKEN": "t",
+          },
+          run
+        ),
+      /403/
+    );
+  } finally {
+    await mock.close();
+    rmSync(path.dirname(eventFile), { recursive: true, force: true });
+  }
+});
+
+test("run() still fails on a 403 under pull_request_target, which gets a write-capable token", async () => {
+  const mock = await forkPermissionsMock([
+    {
+      number: 16,
+      head: { sha: "sha16" },
+      created_at: new Date(Date.now() - 100 * 3600_000).toISOString(),
+      labels: [],
+    },
+  ]);
+  const eventFile = writeEventFile({
+    pull_request: {
+      number: 16,
+      head: { sha: "sha16", repo: { full_name: "contributor/widgets" } },
+      created_at: new Date(Date.now() - 100 * 3600_000).toISOString(),
+      labels: [],
+    },
+  });
+
+  try {
+    await assert.rejects(
+      () =>
+        withEnv(
+          {
+            GITHUB_API_URL: mock.url,
+            GITHUB_REPOSITORY: "acme/widgets",
+            GITHUB_EVENT_NAME: "pull_request_target",
+            GITHUB_EVENT_PATH: eventFile,
+            "INPUT_MIN-HOURS": "48",
+            "INPUT_GITHUB-TOKEN": "t",
+          },
+          run
+        ),
+      /403/
+    );
+  } finally {
+    // Always close, or a failed assertion leaves the server holding the
+    // event loop open and the whole run hangs instead of reporting.
+    await mock.close();
+    rmSync(path.dirname(eventFile), { recursive: true, force: true });
+  }
+});

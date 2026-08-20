@@ -16,6 +16,15 @@ export function info(message: string): void {
   console.log(message);
 }
 
+/**
+ * Annotates the run without failing it — same workflow-command syntax as
+ * setFailed. Used for conditions that are expected rather than wrong, so
+ * `warning` would be its own kind of noise on every affected PR.
+ */
+export function notice(message: string): void {
+  console.log(`::notice::${message}`);
+}
+
 /** Workflow command syntax GitHub Actions parses out of stderr/stdout to annotate the run. */
 export function setFailed(message: string): void {
   process.exitCode = 1;

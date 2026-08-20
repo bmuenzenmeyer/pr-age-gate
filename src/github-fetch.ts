@@ -60,6 +60,26 @@ function authHeaders(token?: string): Record<string, string> {
   return base;
 }
 
+/**
+ * Carries the HTTP status alongside the message so callers can branch on
+ * it. The Action needs to tell an expected 403 — a fork PR's downgraded
+ * token cannot write check runs — apart from a genuine failure, and
+ * regex-matching the message string would be a fragile way to do that.
+ * The message format is unchanged from a plain Error.
+ */
+export class GitHubApiError extends Error {
+  // An explicit field, not a `readonly status` constructor parameter
+  // property: parameter properties aren't erasable, and this package's
+  // source is executed directly under Node's type stripping.
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "GitHubApiError";
+    this.status = status;
+  }
+}
+
 export interface RequestOptions extends Omit<RequestInit, "headers"> {
   token?: string;
   apiBaseUrl?: string;
@@ -75,7 +95,10 @@ export async function githubRequest<T>(path: string, options: RequestOptions = {
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`GitHub API ${init.method ?? "GET"} ${path} failed: ${res.status} ${res.statusText} ${body}`);
+    throw new GitHubApiError(
+      res.status,
+      `GitHub API ${init.method ?? "GET"} ${path} failed: ${res.status} ${res.statusText} ${body}`
+    );
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;

@@ -1,4 +1,4 @@
-# PR Age Gate
+# PR Age Gate - Fork Test
 
 Verifies that a pull request has been open for a configurable minimum
 number of hours. Two ways to use it, from one repo, sharing the same
